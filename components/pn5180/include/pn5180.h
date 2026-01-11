@@ -89,11 +89,29 @@ typedef struct _pn5180_t
     bool          is_rf_on;
 } pn5180_t;
 
+typedef enum _pn5180_mifare_subtype_t
+{
+    PN5180_MIFARE_UNKNOWN = 0,
+    PN5180_MIFARE_CLASSIC_1K,
+    PN5180_MIFARE_CLASSIC_MINI,
+    PN5180_MIFARE_CLASSIC_4K,
+    PN5180_MIFARE_ULTRALIGHT,
+    PN5180_MIFARE_ULTRALIGHT_C,
+    PN5180_MIFARE_ULTRALIGHT_EV1,
+    PN5180_MIFARE_NTAG213,
+    PN5180_MIFARE_NTAG215,
+    PN5180_MIFARE_NTAG216,
+    PN5180_MIFARE_PLUS_2K,
+    PN5180_MIFARE_PLUS_4K,
+    PN5180_MIFARE_DESFIRE,
+} __attribute__((__packed__)) mifare_type_t;
 
 typedef struct
 {
-    int     uid_length;
-    uint8_t uid[12];
+    int8_t        uid_length;
+    uint8_t       sak;
+    mifare_type_t subtype;
+    uint8_t       uid[10];
 } nfc_uid_t;
 
 typedef struct
@@ -104,21 +122,47 @@ typedef struct
 
 struct _pn5180_proto_t;
 
-typedef bool func_setup_rf_t(struct _pn5180_proto_t *pn5180_proto);
 typedef nfc_uids_array_t *funct_get_all_uids_t(struct _pn5180_proto_t *pn5180_proto);
-typedef bool func_select_by_uid_t(struct _pn5180_proto_t *pn5180_proto, nfc_uid_t *uid);
-typedef bool func_block_read_t(struct _pn5180_proto_t *pn5180_proto, uint8_t blockno, uint8_t *buffer);
-typedef int  func_block_write_t(struct _pn5180_proto_t *pn5180_proto, uint8_t blockno, const uint8_t *buffer);
+
+typedef bool func_setup_rf_t(struct _pn5180_proto_t *pn5180_proto);
+typedef bool func_select_by_uid_t(        //
+    struct _pn5180_proto_t *pn5180_proto, //
+    nfc_uid_t              *uid           //
+);
+
+typedef bool func_authenticate_t(         //
+    struct _pn5180_proto_t *pn5180_proto, //
+    const uint8_t          *key,          //
+    uint8_t                 keyType,      //
+    const nfc_uid_t        *uid,          //
+    int                     blockno       //
+);
+/*
+    Returns true if card has to be reselected after detection
+*/
+typedef bool funct_detect_card_type_t( //
+    pn5180_t  *pn5180,                 //
+    nfc_uid_t *uid,                    //
+    int       *blocks_count,           //
+    int       *block_size              //
+);
+
+typedef bool func_block_read_t(struct _pn5180_proto_t *pn5180_proto, int blockno, uint8_t *buffer);
+typedef int  func_block_write_t(struct _pn5180_proto_t *pn5180_proto, int blockno, const uint8_t *buffer);
+typedef bool func_halt_t(struct _pn5180_proto_t *pn5180_proto);
+
 typedef struct _pn5180_proto_t
 {
-    pn5180_t *pn5180;
-    func_setup_rf_t *setup_rf;
-    funct_get_all_uids_t *get_all_uids;
-    func_select_by_uid_t *select_by_uid;
-    func_block_read_t *block_read;
-    func_block_write_t *block_write;
+    pn5180_t                 *pn5180;
+    func_setup_rf_t          *setup_rf;
+    funct_get_all_uids_t     *get_all_uids;
+    func_select_by_uid_t     *select_by_uid;
+    func_block_read_t        *block_read;
+    func_block_write_t       *block_write;
+    func_authenticate_t      *authenticate;
+    funct_detect_card_type_t *detect_card_type_and_capacity;
+    func_halt_t              *halt;
 } pn5180_proto_t;
-
 
 typedef enum
 {
@@ -149,7 +193,7 @@ bool     pn5180_readData(pn5180_t *pn5180, int len, uint8_t *buffer);
 bool     pn5180_prepareLPCD(pn5180_t *pn5180);
 bool     pn5180_switchToLPCD(pn5180_t *pn5180, uint16_t wakeupCounterInMs);
 int16_t  pn5180_mifareAuthenticate(pn5180_t *pn5180, uint8_t blockno, const uint8_t *key, uint8_t keyType,
-                                   const uint8_t *uid);
+                                   const uint8_t uid[4]);
 bool     pn5180_loadRFConfig(pn5180_t *pn5180, uint8_t txConf, uint8_t rxConf);
 bool     pn5180_setRF_on(pn5180_t *pn5180);
 bool     pn5180_setRF_off(pn5180_t *pn5180);

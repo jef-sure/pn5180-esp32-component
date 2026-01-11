@@ -39,6 +39,9 @@
 #define TEMP_CONTROL       (0x25)
 #define AGC_REF_CONFIG     (0x26)
 
+// EEPROM Addresses
+#define MFC_AUTH_TIMEOUT (0x32) // MIFARE Classic authentication timeout
+
 #define LPCD_REFERENCE_VALUE (0x34) // LPCD Gear number
 #define LPCD_FIELD_ON_TIME   (0x36) // LPCD RF on time (μs) = 62 + (8 * LPCD_FIELD_ON_TIME)
 // LPCD wakes up if current AGC > AGC reference + LCPD_THRESHOLD (03..08: very sensitive, 40..50: very robust)
@@ -48,6 +51,28 @@
 #define LPCD_GPO_TOGGLE_AFTER_FIELD_ON  (0x3A) //
 
 const char *TAG = "PN5180";
+
+// Helper function to format hex data for logging (matches reference log format)
+static char        hex_buffer[1024];
+static const char *format_hex_pretty(const uint8_t *data, int len)
+{
+    char *ptr       = hex_buffer;
+    int   remaining = sizeof(hex_buffer) - 1;
+
+    for (int i = 0; i < len && remaining > 0; i++) {
+        int written = snprintf(ptr, remaining, "%02X", data[i]);
+        if (written < 0 || written >= remaining) break;
+        ptr += written;
+        remaining -= written;
+
+        if (i < len - 1 && remaining > 0) {
+            *ptr++ = ' ';
+            remaining--;
+        }
+    }
+    *ptr = '\0';
+    return hex_buffer;
+}
 
 void pn5180_delay_ms(int ms)
 {
@@ -154,6 +179,13 @@ pn5180_t *pn5180_init(pn5180_spi_t *spi, gpio_num_t nss, gpio_num_t busy, gpio_n
         pn5180_deinit(ret, false);
         return NULL;
     }
+    uint8_t eeprom_data[2];
+    if (!pn5180_readEEprom(ret, MFC_AUTH_TIMEOUT, eeprom_data, sizeof(eeprom_data))) {
+        ESP_LOGW(TAG, "Failed to set MFC_AUTH_TIMEOUT to maximum");
+    } else {
+        ESP_LOGD(TAG, "Current MFC_AUTH_TIMEOUT: 0x%02X 0x%02X", eeprom_data[0], eeprom_data[1]);
+    }
+
     return ret;
 }
 
@@ -177,15 +209,17 @@ Phase 2: Receive response
 */
 
 static bool transceive_command(pn5180_t *pn5180, uint8_t *send_data, size_t send_data_len, uint8_t *recv_data,
-                        size_t recv_data_len)
+                               size_t recv_data_len)
 {
     if (send_data_len > PN5180_MAX_BUF_SIZE || recv_data_len > PN5180_MAX_BUF_SIZE) {
         ESP_LOGE(TAG, "transceive_command: Buffer size exceeds maximum");
         return false;
     }
+
     spi_transaction_t trans;
     memset(&trans, 0, sizeof(trans));
     memcpy(pn5180->send_buf, send_data, send_data_len);
+    ESP_LOGD(TAG, "SPI TX: %s", format_hex_pretty(send_data, send_data_len));
     memset(pn5180->recv_buf, 0xff, PN5180_MAX_BUF_SIZE);
     trans.tx_buffer = pn5180->send_buf;
     trans.rx_buffer = pn5180->recv_buf;
@@ -232,6 +266,7 @@ static bool transceive_command(pn5180_t *pn5180, uint8_t *send_data, size_t send
         return false;
     }
     memcpy(recv_data, pn5180->recv_buf, recv_data_len);
+    ESP_LOGD(TAG, "SPI RX: %s", format_hex_pretty(recv_data, recv_data_len));
     return true;
 }
 
@@ -367,6 +402,8 @@ bool pn5180_sendData(pn5180_t *pn5180, const uint8_t *data, int len, uint8_t val
         ESP_LOGE(TAG, "sendData: validBits must be in the range 0-7");
         return false;
     }
+
+    // Simple state machine: always go Idle → Transceive
     if (!pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xfffffff8)) { // Idle/StopCom Command
         ESP_LOGE(TAG, "sendData: Failed to set Idle/StopCom Command before sending data");
         return false;
@@ -375,9 +412,10 @@ bool pn5180_sendData(pn5180_t *pn5180, const uint8_t *data, int len, uint8_t val
         ESP_LOGE(TAG, "sendData: Failed to set Transceive Command before sending data");
         return false;
     }
-    pn5180_transceive_state_t state;
 
-    int64_t tstate_deadline = esp_timer_get_time() + (1000LL * pn5180->timeout_ms);
+    // Wait for state transition with timeout
+    pn5180_transceive_state_t state;
+    int64_t tstate_deadline = esp_timer_get_time() + (1000000LL); // 1 second timeout
     do {
         state = pn5180_getTransceiveState(pn5180);
         if (esp_timer_get_time() > tstate_deadline) {
@@ -385,7 +423,16 @@ bool pn5180_sendData(pn5180_t *pn5180, const uint8_t *data, int len, uint8_t val
             return false;
         }
     } while (state != PN5180_TS_WaitTransmit);
+
     pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF); // Clear all IRQs before sending data
+
+    // Log the exact data being sent
+    if (validBits == 0) {
+        ESP_LOGD(TAG, "Sending data: %s", format_hex_pretty(data, len));
+    } else {
+        ESP_LOGD(TAG, "Sending data: %s (%d bits)", format_hex_pretty(data, len), validBits);
+    }
+
     uint8_t  small_send_buf[32];
     uint8_t *send_buf;
     if (len + 2 <= sizeof(small_send_buf)) {
@@ -433,6 +480,8 @@ bool pn5180_readData(pn5180_t *pn5180, int len, uint8_t *buffer)
     bool ret = transceive_command(pn5180, cmd_buf, sizeof(cmd_buf), buffer, len);
     if (!ret) {
         ESP_LOGE(TAG, "readData: Failed to read data");
+    } else {
+        ESP_LOGD(TAG, "Received data: %s", format_hex_pretty(buffer, len));
     }
     return ret;
 }
@@ -576,25 +625,86 @@ uint32_t pn5180_rxBytesReceived(pn5180_t *pn5180)
 }
 
 int16_t pn5180_mifareAuthenticate(pn5180_t *pn5180, uint8_t blockno, const uint8_t *key, uint8_t keyType,
-                                  const uint8_t *uid)
+                                  const uint8_t uid[4])
 {
     if (keyType != 0x60 && keyType != 0x61) {
         ESP_LOGE(TAG, "Invalid key type 0x%02X for MIFARE authentication", keyType);
         return -1;
     }
     uint8_t cmd_buf[13];
-    uint8_t rcvBuffer[1] = {0x02};
-    cmd_buf[0]           = PN5180_MIFARE_AUTHENTICATE; // PN5180 MF Authenticate command
+    uint8_t rcvBuffer[1];
+
+    // Format per PN5180 datasheet: [Cmd][Key(6)][KeyType][Block][UID(4)]
+    cmd_buf[0] = PN5180_MIFARE_AUTHENTICATE;
     memcpy(&cmd_buf[1], key, 6);
-    cmd_buf[7] = keyType;
-    cmd_buf[8] = blockno;
+    cmd_buf[7] = keyType; // 0x60 Key A, 0x61 Key B
+    cmd_buf[8] = blockno; // block within sector to auth
     memcpy(&cmd_buf[9], uid, 4);
+
+    ESP_LOGD(TAG,
+             "AUTH cmd: [Cmd=0x%02X][Key=%02X %02X %02X %02X %02X %02X][KeyType=0x%02X][Block=0x%02X][UID=%02X %02X "
+             "%02X %02X]",
+             cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3], cmd_buf[4], cmd_buf[5], cmd_buf[6], cmd_buf[7], cmd_buf[8],
+             cmd_buf[9], cmd_buf[10], cmd_buf[11], cmd_buf[12]);
+
     bool rc = transceive_command(pn5180, cmd_buf, sizeof(cmd_buf), rcvBuffer, 1);
     if (!rc) {
-        ESP_LOGE(TAG, "Failed to perform MIFARE authentication");
+        ESP_LOGE(TAG, "Failed to perform MIFARE authentication SPI transaction");
         return -3;
     }
-    return rcvBuffer[0];
+    ESP_LOGD(TAG, "AUTH response byte: 0x%02X", rcvBuffer[0]);
+
+    // Check response code first - if not 0x00, authentication failed
+    if (rcvBuffer[0] != 0x00) {
+        ESP_LOGD(TAG, "Authentication failed (response: 0x%02X) - resetting transceiver state", rcvBuffer[0]);
+        // Clear Crypto1 bit and reset transceiver to clean state
+        pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xFFFFFFBF); // Clear MFC_CRYPTO_ON
+        pn5180_set_transceiver_idle(pn5180);
+        
+        // Flush any stale data from RX buffer
+        uint32_t rxStatus;
+        if (pn5180_readRegister(pn5180, RX_STATUS, &rxStatus)) {
+            uint16_t rxLen = rxStatus & RX_BYTES_RECEIVED_MASK;
+            if (rxLen > 0 && rxLen < 512) {
+                uint8_t dummy[512];
+                pn5180_readData(pn5180, rxLen, dummy);
+            }
+        }
+        
+        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        
+        // Wait for transceiver to reach idle state before returning
+        pn5180_transceive_state_t tstate;
+        int64_t deadline = esp_timer_get_time() + 50 * 1000; // 50ms max
+        do {
+            tstate = pn5180_getTransceiveState(pn5180);
+            if (tstate == PN5180_TS_Idle) {
+                break;
+            }
+            esp_rom_delay_us(10);
+        } while (esp_timer_get_time() < deadline);
+        
+        return rcvBuffer[0];
+    }
+
+    // Authentication response is 0x00 (success) - wait briefly for transceiver readiness
+    // Avoid long IRQ polling; prefer checking transceive state
+    pn5180_transceive_state_t tstate;
+    int64_t                    deadline = esp_timer_get_time() + 50 * 1000; // 50ms max
+    do {
+        tstate = pn5180_getTransceiveState(pn5180);
+        if (tstate == PN5180_TS_WaitTransmit || tstate == PN5180_TS_Idle) {
+            break;
+        }
+        esp_rom_delay_us(10);
+    } while (esp_timer_get_time() < deadline);
+
+    // Read & clear IRQ once for visibility, without spamming
+    uint32_t irqStatus = pn5180_getIRQStatus(pn5180);
+    ESP_LOGD(TAG, "IRQ_STATUS after auth: 0x%08X", irqStatus);
+    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+
+    return 0x00;
 }
 
 /*
@@ -767,10 +877,12 @@ bool pn5180_wait_for_irq(pn5180_t *pn5180, uint32_t irq_mask, const char *operat
             if (*irqStatus & GENERAL_ERROR_IRQ_STAT) {
                 ESP_LOGW(TAG, "General error detected during %s", operation);
             }
+            pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
             return true;
         }
         if (esp_timer_get_time() > deadline) {
             ESP_LOGE(TAG, "Timeout waiting for %s", operation);
+            pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
             return false;
         }
         esp_rom_delay_us(10);
