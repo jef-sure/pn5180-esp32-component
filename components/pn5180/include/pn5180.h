@@ -50,6 +50,14 @@
 #define IRQ_STATUS         (0x02)
 #define IRQ_CLEAR          (0x03)
 #define TRANSCEIVE_CONTROL (0x04)
+
+// SYSTEM_CONFIG register bit masks
+#define SYSTEM_CONFIG_MFC_CRYPTO_ON          (1 << 6)   // Bit 6 - MIFARE Crypto1 enabled
+#define SYSTEM_CONFIG_TX_MODE_MASK           0x00000003 // Bits 0-2 - Transceiver mode
+#define SYSTEM_CONFIG_TX_MODE_IDLE           0x00000000
+#define SYSTEM_CONFIG_TX_MODE_TRANSCEIVE     0x00000003
+#define SYSTEM_CONFIG_CLEAR_CRYPTO_MASK      0xFFFFFFBF // ~(1<<6) - Clear MFC_CRYPTO_ON bit
+#define SYSTEM_CONFIG_CLEAR_TX_MODE_MASK     0xFFFFFFF8 // ~0x07 - Clear transceiver state bits
 #define TIMER1_RELOAD      (0x0c)
 #define TIMER1_CONFIG      (0x0f)
 #define RX_WAIT_CONFIG     (0x11)
@@ -147,7 +155,7 @@ typedef bool funct_detect_card_type_t( //
     int       *block_size              //
 );
 
-typedef bool func_block_read_t(struct _pn5180_proto_t *pn5180_proto, int blockno, uint8_t *buffer);
+typedef bool func_block_read_t(struct _pn5180_proto_t *pn5180_proto, int blockno, uint8_t *buffer, size_t buffer_len);
 typedef int  func_block_write_t(struct _pn5180_proto_t *pn5180_proto, int blockno, const uint8_t *buffer);
 typedef bool func_halt_t(struct _pn5180_proto_t *pn5180_proto);
 
@@ -188,17 +196,18 @@ bool pn5180_readRegister(pn5180_t *pn5180, uint8_t reg, uint32_t *value);
 bool pn5180_readEEprom(pn5180_t *pn5180, uint8_t addr, uint8_t *buffer, int len);
 bool pn5180_writeEEprom(pn5180_t *pn5180, uint8_t addr, uint8_t *buffer, int len);
 
-bool     pn5180_sendData(pn5180_t *pn5180, const uint8_t *data, int len, uint8_t validBits);
-bool     pn5180_readData(pn5180_t *pn5180, int len, uint8_t *buffer);
-bool     pn5180_prepareLPCD(pn5180_t *pn5180);
-bool     pn5180_switchToLPCD(pn5180_t *pn5180, uint16_t wakeupCounterInMs);
-int16_t  pn5180_mifareAuthenticate(pn5180_t *pn5180, uint8_t blockno, const uint8_t *key, uint8_t keyType,
-                                   const uint8_t uid[4]);
-bool     pn5180_loadRFConfig(pn5180_t *pn5180, uint8_t txConf, uint8_t rxConf);
-bool     pn5180_setRF_on(pn5180_t *pn5180);
-bool     pn5180_setRF_off(pn5180_t *pn5180);
-bool     pn5180_sendCommand(pn5180_t *pn5180, uint8_t *sendBuffer, size_t sendBufferLen, uint8_t *recvBuffer,
-                            size_t recvBufferLen);
+bool    pn5180_sendData(pn5180_t *pn5180, const uint8_t *data, int len, uint8_t validBits);
+bool    pn5180_readData(pn5180_t *pn5180, int len, uint8_t *buffer);
+bool    pn5180_prepareLPCD(pn5180_t *pn5180);
+bool    pn5180_switchToLPCD(pn5180_t *pn5180, uint16_t wakeupCounterInMs);
+int16_t pn5180_mifareAuthenticate(pn5180_t *pn5180, uint8_t blockno, const uint8_t *key, uint8_t keyType,
+                                  const uint8_t uid[4]);
+bool    pn5180_loadRFConfig(pn5180_t *pn5180, uint8_t txConf, uint8_t rxConf);
+bool    pn5180_setRF_on(pn5180_t *pn5180);
+bool    pn5180_setRF_off(pn5180_t *pn5180);
+bool    pn5180_sendCommand(pn5180_t *pn5180, uint8_t *sendBuffer, size_t sendBufferLen, uint8_t *recvBuffer,
+                           size_t recvBufferLen);
+// Helper to clear all IRQ flags
 uint32_t pn5180_rxBytesReceived(pn5180_t *pn5180);
 bool     pn5180_reset(pn5180_t *pn5180);
 uint32_t pn5180_getIRQStatus(pn5180_t *pn5180);
@@ -242,11 +251,16 @@ static void inline pn5180_disable_crc(pn5180_t *pn5180)
     pn5180_disable_tx_crc(pn5180);
 }
 
+static bool inline pn5180_clearAllIRQs(pn5180_t *pn5180)
+{
+    return pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+}
+
 static bool inline pn5180_set_transceiver_idle(pn5180_t *pn5180)
 {
     bool ret = pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xFFFFFFF8); // Idle/StopCom Command
     if (ret) {
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
     }
     return ret;
 }

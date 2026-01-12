@@ -190,12 +190,12 @@ static void read_card_blocks(pn5180_proto_t *proto, nfc_uid_t *uid, int blocks_c
             }
         }
 
-        if (proto->block_read(proto, block, block_data)) {
+        if (proto->block_read(proto, block, block_data, block_size)) {
             print_block_data(block, block_data, block_size);
         } else {
             ESP_LOGW(TAG, "Block %3d: Read failed", block);
             // Retry once for any transient read failure (all card types)
-            if (proto->block_read(proto, block, block_data)) {
+            if (proto->block_read(proto, block, block_data, block_size)) {
                 ESP_LOGI(TAG, "Block %3d: Read succeeded on retry", block);
                 print_block_data(block, block_data, block_size);
             } else {
@@ -204,6 +204,7 @@ static void read_card_blocks(pn5180_proto_t *proto, nfc_uid_t *uid, int blocks_c
                 if (needs_auth) {
                     current_sector = -1;
                 }
+                pn5180_delay_ms(5); // Short delay before next operation
             }
         }
     }
@@ -302,7 +303,7 @@ static void scan_loop(pn5180_proto_t *proto)
 
         // Reset transceiver and RF field completely
         pn5180_set_transceiver_idle(proto->pn5180);
-        pn5180_writeRegisterWithAndMask(proto->pn5180, SYSTEM_CONFIG, 0xFFFFFFBF); // Clear Crypto1
+        pn5180_writeRegisterWithAndMask(proto->pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_CLEAR_CRYPTO_MASK); // Clear Crypto1
         pn5180_clearIRQStatus(proto->pn5180, 0xFFFFFFFF);
         pn5180_setRF_off(proto->pn5180);
         pn5180_delay_ms(10);

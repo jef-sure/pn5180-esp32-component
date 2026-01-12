@@ -10,7 +10,7 @@ static nfc_uids_array_t *pn5180_14443_get_all_uids(pn5180_t *pn5180);
 static bool pn5180_14443_select_by_uid(pn5180_t *pn5180, nfc_uid_t *uid);
 static bool pn5180_14443_detect_ultralight_variant(pn5180_t *pn5180, mifare_type_t *subtype, int *blocks_count);
 static void pn5180_14443_detect_desfire_capacity(pn5180_t *pn5180, int *blocks_count);
-static bool pn5180_14443_mifareBlockRead(pn5180_t *pn5180, int blockno, uint8_t *buffer);
+static bool pn5180_14443_mifareBlockRead(pn5180_t *pn5180, int blockno, uint8_t *buffer, size_t buffer_len);
 static int  pn5180_14443_mifareBlockWrite(pn5180_t *pn5180, int blockno, const uint8_t *buffer);
 static bool pn5180_14443_mifareHalt(pn5180_t *pn5180);
 static bool pn5180_14443_setupRF(pn5180_t *pn5180);
@@ -36,9 +36,9 @@ static bool _pn5180_14443_select_by_uid(pn5180_proto_t *proto, nfc_uid_t *uid)
     return pn5180_14443_select_by_uid(proto->pn5180, uid);
 }
 
-static bool _pn5180_14443_mifareBlockRead(pn5180_proto_t *proto, int blockno, uint8_t *buffer)
+static bool _pn5180_14443_mifareBlockRead(pn5180_proto_t *proto, int blockno, uint8_t *buffer, size_t buffer_len)
 {
-    return pn5180_14443_mifareBlockRead(proto->pn5180, blockno, buffer);
+    return pn5180_14443_mifareBlockRead(proto->pn5180, blockno, buffer, buffer_len);
 }
 
 static int _pn5180_14443_mifareBlockWrite(pn5180_proto_t *proto, int blockno, const uint8_t *buffer)
@@ -112,7 +112,7 @@ static bool _pn5180_14443_authenticate( //
     if (auth_result != 0x00) {
         ESP_LOGE(TAG, "MIFARE authentication rejected by card (status: 0x%02X)", auth_result);
         // On failed authentication, disable Crypto1 and reset to clean state
-        pn5180_writeRegisterWithAndMask(proto->pn5180, SYSTEM_CONFIG, 0xFFFFFFBF); // Clear MFC_CRYPTO_ON
+        pn5180_writeRegisterWithAndMask(proto->pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_CLEAR_CRYPTO_MASK); // Clear MFC_CRYPTO_ON
         pn5180_disable_crc(proto->pn5180);
         return false;
     }
@@ -167,43 +167,14 @@ static bool pn5180_14443_setupRF(pn5180_t *pn5180)
     return true;
 }
 
-/*
-static void showIRQStatus(uint32_t irqStatus)
-{
-    printf("IRQ-Status 0x");
-    printf("%08" PRIX32, irqStatus);
-    printf(": [ ");
-    if (irqStatus & (1 << 0)) printf("RQ ");
-    if (irqStatus & (1 << 1)) printf("TX ");
-    if (irqStatus & (1 << 2)) printf("IDLE ");
-    if (irqStatus & (1 << 3)) printf("MODE_DETECTED ");
-    if (irqStatus & (1 << 4)) printf("CARD_ACTIVATED ");
-    if (irqStatus & (1 << 5)) printf("STATE_CHANGE ");
-    if (irqStatus & (1 << 6)) printf("RFOFF_DET ");
-    if (irqStatus & (1 << 7)) printf("RFON_DET ");
-    if (irqStatus & (1 << 8)) printf("TX_RFOFF ");
-    if (irqStatus & (1 << 9)) printf("TX_RFON ");
-    if (irqStatus & (1 << 10)) printf("RF_ACTIVE_ERROR ");
-    if (irqStatus & (1 << 11)) printf("TIMER0 ");
-    if (irqStatus & (1 << 12)) printf("TIMER1 ");
-    if (irqStatus & (1 << 13)) printf("TIMER2 ");
-    if (irqStatus & (1 << 14)) printf("RX_SOF_DET ");
-    if (irqStatus & (1 << 15)) printf("RX_SC_DET ");
-    if (irqStatus & (1 << 16)) printf("TEMPSENS_ERROR ");
-    if (irqStatus & (1 << 17)) printf("GENERAL_ERROR ");
-    if (irqStatus & (1 << 18)) printf("HV_ERROR ");
-    if (irqStatus & (1 << 19)) printf("LPCD ");
-    printf("]\n");
-}
-*/
 static bool pn5180_14443_sendREQA(pn5180_t *pn5180, uint8_t *atqa)
 {
     // REQA is a 7-bit command (0x26)
     uint8_t cmd_buf[1] = {0x26};
 
     // Clear MFC_CRYPTO_ON bit to ensure clean state for new card discovery
-    pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xFFFFFFBF);
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_CLEAR_CRYPTO_MASK);
+    pn5180_clearAllIRQs(pn5180);
     pn5180_disable_crc(pn5180);
     ESP_LOGD(TAG, "Sending REQA: 0x%02X (7 bits)", cmd_buf[0]);
     if (!pn5180_sendData(pn5180, cmd_buf, 1, 7)) {
@@ -219,7 +190,7 @@ static bool pn5180_14443_sendREQA(pn5180_t *pn5180, uint8_t *atqa)
     }
 
     if (irqStatus & GENERAL_ERROR_IRQ_STAT) {
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return false;
     }
 
@@ -232,7 +203,7 @@ static bool pn5180_14443_sendREQA(pn5180_t *pn5180, uint8_t *atqa)
         }
         ESP_LOGD(TAG, "REQA Success, ATQA: 0x%02X%02X", atqa[0], atqa[1]);
     }
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_clearAllIRQs(pn5180);
     return (rxLen > 0);
 }
 
@@ -243,8 +214,8 @@ static bool pn5180_14443_sendWUPA(pn5180_t *pn5180, uint8_t *atqa)
 
     // Clear MFC_CRYPTO_ON bit to ensure clean state
     // Don't manually set transceive state - let pn5180_sendData() handle it
-    pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xFFFFFFBF);
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_CLEAR_CRYPTO_MASK);
+    pn5180_clearAllIRQs(pn5180);
     pn5180_disable_crc(pn5180);
     ESP_LOGD(TAG, "Sending WUPA: 0x%02X (7 bits)", cmd_buf[0]);
     if (!pn5180_sendData(pn5180, cmd_buf, 1, 7)) {
@@ -260,7 +231,7 @@ static bool pn5180_14443_sendWUPA(pn5180_t *pn5180, uint8_t *atqa)
     }
 
     if (irqStatus & GENERAL_ERROR_IRQ_STAT) {
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return false;
     }
 
@@ -274,7 +245,7 @@ static bool pn5180_14443_sendWUPA(pn5180_t *pn5180, uint8_t *atqa)
         ESP_LOGD(TAG, "WUPA Success, ATQA: 0x%02X%02X", atqa[0], atqa[1]);
     }
 
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_clearAllIRQs(pn5180);
     return (rxLen > 0);
 }
 
@@ -289,7 +260,7 @@ static bool prepare_14443A_activation(pn5180_t *pn5180)
     // This matches the working log initialization sequence:
     
     // 1. Clear MFC_CRYPTO_ON software bit (bit 6) only
-    if (!pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xFFFFFFBF)) {
+    if (!pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_CLEAR_CRYPTO_MASK)) {
         ESP_LOGE(TAG, "Failed to clear MFC_CRYPTO_ON");
         return false;
     }
@@ -298,19 +269,19 @@ static bool prepare_14443A_activation(pn5180_t *pn5180)
     pn5180_disable_crc(pn5180);
     
     // 3. Force transceiver to IDLE state (clears bits [2:0])
-    if (!pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xFFFFFFF8)) {
+    if (!pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_CLEAR_TX_MODE_MASK)) {
         ESP_LOGE(TAG, "Failed to set transceiver to IDLE");
         return false;
     }
     
     // 4. Set to Transceive state
-    if (!pn5180_writeRegisterWithOrMask(pn5180, SYSTEM_CONFIG, 0x00000003)) {
+    if (!pn5180_writeRegisterWithOrMask(pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_TX_MODE_TRANSCEIVE)) {
         ESP_LOGE(TAG, "Failed to set Transceive state");
         return false;
     }
     
     // 5. Clear all IRQ flags
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_clearAllIRQs(pn5180);
     
     return true;
 }
@@ -342,7 +313,7 @@ static bool pn5180_14443_mifareHalt(pn5180_t *pn5180)
     pn5180_disable_crc(pn5180);
     pn5180_set_transceiver_idle(pn5180);
     // Clear MFC_CRYPTO_ON bit to disable MIFARE Crypto1 after halt
-    pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, 0xFFFFFFBF);
+    pn5180_writeRegisterWithAndMask(pn5180, SYSTEM_CONFIG, SYSTEM_CONFIG_CLEAR_CRYPTO_MASK);
     return ret;
 }
 
@@ -364,7 +335,7 @@ static bool pn5180_14443_sendSelect(pn5180_t *pn5180, int cascade_level, uint8_t
     uint32_t irqStatus;
     bool     got_response =
         pn5180_wait_for_irq(pn5180, RX_IRQ_STAT | GENERAL_ERROR_IRQ_STAT, "Select response", &irqStatus);
-    pn5180_clearIRQStatus(pn5180, 0xffffffff);
+    pn5180_clearAllIRQs(pn5180);
     if (!got_response) {
         pn5180_disable_crc(pn5180);
         ESP_LOGE(TAG, "Timeout waiting for Select response at level %d", cascade_level);
@@ -455,7 +426,7 @@ static bool pn5180_14443_resolve_collision(pn5180_t *pn5180, uint8_t cascadeLeve
             uint32_t newRxStatus;
             if (!pn5180_readRegister(pn5180, RX_STATUS, &newRxStatus)) {
                 ESP_LOGE(TAG, "Failed to read RX_STATUS in collision retry at level %d", cascadeLevel);
-                pn5180_clearIRQStatus(pn5180, 0xffffffff);
+                pn5180_clearAllIRQs(pn5180);
                 return false;
             }
 
@@ -467,12 +438,12 @@ static bool pn5180_14443_resolve_collision(pn5180_t *pn5180, uint8_t cascadeLeve
                 if (newRxLen > 0 && newRxLen <= 5) {
                     if (!pn5180_readData(pn5180, newRxLen, active_uid)) {
                         ESP_LOGE(TAG, "Failed to read partial UID in retry at level %d", cascadeLevel);
-                        pn5180_clearIRQStatus(pn5180, 0xffffffff);
+                        pn5180_clearAllIRQs(pn5180);
                         return false;
                     }
                 }
 
-                pn5180_clearIRQStatus(pn5180, 0xffffffff);
+                pn5180_clearAllIRQs(pn5180);
 
                 // Force new collision bit and continue
                 uint8_t new_byte_idx = newCollisionPos / 8;
@@ -486,18 +457,18 @@ static bool pn5180_14443_resolve_collision(pn5180_t *pn5180, uint8_t cascadeLeve
         // No collision - read complete response
         rxLen = pn5180_rxBytesReceived(pn5180);
         if (rxLen == 0 || rxLen > 10) {
-            pn5180_clearIRQStatus(pn5180, 0xffffffff);
+            pn5180_clearAllIRQs(pn5180);
             ESP_LOGE(TAG, "Invalid response length %d after collision resolution", rxLen);
             return false;
         }
 
         if (!pn5180_readData(pn5180, rxLen, cmd_buf)) {
-            pn5180_clearIRQStatus(pn5180, 0xffffffff);
+            pn5180_clearAllIRQs(pn5180);
             ESP_LOGE(TAG, "Failed to read UID+BCC after collision resolution at level %d", cascadeLevel);
             return false;
         }
 
-        pn5180_clearIRQStatus(pn5180, 0xffffffff);
+        pn5180_clearAllIRQs(pn5180);
 
         // Validate BCC and return
         if (rxLen == 5) {
@@ -543,19 +514,19 @@ static bool pn5180_14443_anticollision_level(pn5180_t *pn5180, uint8_t cascadeLe
     // Get response length
     uint16_t rxLen = pn5180_rxBytesReceived(pn5180);
     if (rxLen == 0 || rxLen > 10) {
-        pn5180_clearIRQStatus(pn5180, 0xffffffff);
+        pn5180_clearAllIRQs(pn5180);
         ESP_LOGE(TAG, "Invalid response length %d at level %d", rxLen, cascadeLevel);
         return false;
     }
 
     // Read response
     if (!pn5180_readData(pn5180, rxLen, cmd_buf)) {
-        pn5180_clearIRQStatus(pn5180, 0xffffffff);
+        pn5180_clearAllIRQs(pn5180);
         ESP_LOGE(TAG, "Failed to read response at level %d", cascadeLevel);
         return false;
     }
 
-    pn5180_clearIRQStatus(pn5180, 0xffffffff);
+    pn5180_clearAllIRQs(pn5180);
 
     // Check for collision
     if ((irqStatus & GENERAL_ERROR_IRQ_STAT) == 0) {
@@ -715,7 +686,7 @@ static bool pn5180_14443_detect_ultralight_variant(pn5180_t *pn5180, mifare_type
     uint32_t irqStatus;
     if (!pn5180_wait_for_irq(pn5180, RX_IRQ_STAT | GENERAL_ERROR_IRQ_STAT, "GET_VERSION", &irqStatus)) {
         ESP_LOGD(TAG, "GET_VERSION timeout - assuming standard Ultralight");
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         pn5180_disable_crc(pn5180);
         return true;
     }
@@ -723,7 +694,7 @@ static bool pn5180_14443_detect_ultralight_variant(pn5180_t *pn5180, mifare_type
     // Check for errors
     if (irqStatus & GENERAL_ERROR_IRQ_STAT) {
         ESP_LOGD(TAG, "GET_VERSION general error - assuming standard Ultralight");
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         pn5180_disable_crc(pn5180);
         return true;
     }
@@ -732,12 +703,12 @@ static bool pn5180_14443_detect_ultralight_variant(pn5180_t *pn5180, mifare_type
     uint16_t rxLen = pn5180_rxBytesReceived(pn5180);
     if (rxLen < 8 || !pn5180_readData(pn5180, 8, response)) {
         ESP_LOGD(TAG, "GET_VERSION read failed (rxLen=%d) - assuming standard Ultralight", rxLen);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         pn5180_disable_crc(pn5180);
         return true;
     }
 
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_clearAllIRQs(pn5180);
     pn5180_disable_crc(pn5180);
 
     // Extract and map storage size byte (response[6])
@@ -878,7 +849,7 @@ static bool pn5180_14443_select_by_uid( //
     prepare_14443A_activation(pn5180);
     if (!pn5180_14443_sendWUPA(pn5180, atqa)) {
         ESP_LOGE(TAG, "No card in field for direct selection");
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return false;
     }
 
@@ -887,7 +858,7 @@ static bool pn5180_14443_select_by_uid( //
         if (uid_offset >= uid->uid_length) {
             ESP_LOGE(TAG, "UID offset %d exceeds UID length %d at level %d", uid_offset, uid->uid_length,
                      current_level);
-            pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+            pn5180_clearAllIRQs(pn5180);
             return false;
         }
 
@@ -902,7 +873,7 @@ static bool pn5180_14443_select_by_uid( //
             uint8_t remaining = uid->uid_length - uid_offset;
             if (remaining < 4) {
                 ESP_LOGE(TAG, "Insufficient UID bytes at level %d: need 4, have %d", current_level, remaining);
-                pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+                pn5180_clearAllIRQs(pn5180);
                 return false;
             }
             memcpy(level_data, &uid->uid[uid_offset], 4);
@@ -915,7 +886,7 @@ static bool pn5180_14443_select_by_uid( //
         // 2. Perform Selection (NVB = 0x70)
         if (!pn5180_14443_sendSelect(pn5180, current_level, level_data, &sak)) {
             ESP_LOGE(TAG, "Direct Select failed at Level %d", current_level);
-            pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+            pn5180_clearAllIRQs(pn5180);
             return false;
         }
 
@@ -933,7 +904,7 @@ static bool pn5180_14443_select_by_uid( //
     return false;
 }
 
-static bool pn5180_14443_mifareBlockRead(pn5180_t *pn5180, int blockno, uint8_t *buffer)
+static bool pn5180_14443_mifareBlockRead(pn5180_t *pn5180, int blockno, uint8_t *buffer, size_t buffer_len)
 {
     // Do not toggle CRC here; it must remain as set by SELECT/AUTH
 
@@ -945,7 +916,7 @@ static bool pn5180_14443_mifareBlockRead(pn5180_t *pn5180, int blockno, uint8_t 
     ESP_LOGD(TAG, "READ data: 0x%02X 0x%02X", cmd_buf[0], cmd_buf[1]);
 
     // Clear IRQs before sending
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_clearAllIRQs(pn5180);
 
     // Send read command - Crypto1 state will be preserved by pn5180_sendData if active
     if (!pn5180_sendData(pn5180, cmd_buf, 2, 0x00)) {
@@ -973,7 +944,7 @@ static bool pn5180_14443_mifareBlockRead(pn5180_t *pn5180, int blockno, uint8_t 
 
     if (rxStatus & (RX_PROTOCOL_ERROR | RX_DATA_INTEGRITY_ERROR)) {
         ESP_LOGE(TAG, "RX error during MIFARE block %d read (RX_STATUS=0x%08lX)", blockno, rxStatus);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return false;
     }
 
@@ -982,19 +953,29 @@ static bool pn5180_14443_mifareBlockRead(pn5180_t *pn5180, int blockno, uint8_t 
         ESP_LOGE(TAG,
                  "MIFARE block %d read returned incorrect length: %d (expected 16 for Classic or 4 for Ultralight)",
                  blockno, rxLen);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return false;
     } else {
         ESP_LOGD(TAG, "MIFARE block %d read returned %d bytes", blockno, rxLen);
     }
 
-    if (!pn5180_readData(pn5180, rxLen, buffer)) {
+    // Always read data from PN5180 to clear its internal buffer
+    // Use temporary buffer if user buffer is too small
+    uint8_t temp_buffer[16];
+    uint8_t *read_buffer = (rxLen <= buffer_len) ? buffer : temp_buffer;
+    
+    if (!pn5180_readData(pn5180, rxLen, read_buffer)) {
         ESP_LOGE(TAG, "Failed to read MIFARE block %d data", blockno);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return false;
     }
 
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    if (rxLen > buffer_len) {
+        ESP_LOGD(TAG, "MIFARE block %d read returned %d bytes, but buffer is only %zu bytes, return required length", blockno, rxLen, buffer_len);
+        memcpy(buffer, temp_buffer, buffer_len);
+    }
+
+    pn5180_clearAllIRQs(pn5180);
     return true;
 }
 
@@ -1018,25 +999,25 @@ static int pn5180_14443_mifareBlockWrite(pn5180_t *pn5180, int blockno, const ui
 
     if (irqStatus & GENERAL_ERROR_IRQ_STAT) {
         ESP_LOGE(TAG, "Error during MIFARE block %d write ACK", blockno);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return -1;
     }
 
     uint16_t rxLen = pn5180_rxBytesReceived(pn5180);
     if (rxLen != 1) {
         ESP_LOGE(TAG, "MIFARE block %d write ACK returned incorrect length: %d", blockno, rxLen);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return -2;
     }
 
     uint8_t ack;
     if (!pn5180_readData(pn5180, 1, &ack)) {
         ESP_LOGE(TAG, "Failed to read MIFARE block %d write ACK", blockno);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return -2;
     }
 
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_clearAllIRQs(pn5180);
 
     if ((ack & 0x0F) != 0x0A) {
         ESP_LOGE(TAG, "MIFARE block %d write NACK received: 0x%02X", blockno, ack);
@@ -1057,24 +1038,24 @@ static int pn5180_14443_mifareBlockWrite(pn5180_t *pn5180, int blockno, const ui
 
     if (irqStatus & GENERAL_ERROR_IRQ_STAT) {
         ESP_LOGE(TAG, "Error during MIFARE block %d write final ACK", blockno);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return -5;
     }
 
     rxLen = pn5180_rxBytesReceived(pn5180);
     if (rxLen != 1) {
         ESP_LOGE(TAG, "MIFARE block %d write final ACK returned incorrect length: %d", blockno, rxLen);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return -6;
     }
 
     if (!pn5180_readData(pn5180, 1, &ack)) {
         ESP_LOGE(TAG, "Failed to read MIFARE block %d write final ACK", blockno);
-        pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+        pn5180_clearAllIRQs(pn5180);
         return -7;
     }
 
-    pn5180_clearIRQStatus(pn5180, 0xFFFFFFFF);
+    pn5180_clearAllIRQs(pn5180);
 
     if ((ack & 0x0F) != 0x0A) {
         ESP_LOGE(TAG, "MIFARE block %d write final NACK received: 0x%02X", blockno, ack);
@@ -1082,284 +1063,3 @@ static int pn5180_14443_mifareBlockWrite(pn5180_t *pn5180, int blockno, const ui
     }
     return 0;
 }
-
-/*
-
-successful activation log example:
-entry 0x400805e4
-==================================
-Uploaded: Jan 11 2026 19:03:53
-PN5180 ISO14443 Demo Sketch
-| PN5180::begin(sck=-1, miso=-1, mosi=-1, ss=-1)
-|  Default SPI pinout: SS=5, MOSI=23, MISO=19, SCK=18
-----------------------------------
-PN5180 Hard-Reset...
-| PN5180::reset()
-|  wait for system to start up (500 ms)
-|  PN5180::getIRQStatus()
-|   Read IRQ-Status register...
-|   PN5180::readRegister(reg=0x02, *value)
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|     Sending SPI frame: '04 02'
-|     Receiving SPI frame...
-|     Received: '04 00 00 00'
-|    Register value=0x00000004
-|   IRQ-Status=0x00000004
-|  irq status: 00000004x
-----------------------------------
-Reading product version...
-| PN5180::readEEprom(addr=10, *buffer, len=2)
-|  Reading EEPROM at 0x10, size=2...
-|  PN5180::transceiveCommand(*sendBuffer, sendBufferLen=3, *recvBuffer, recvBufferLen=2)
-|   Sending SPI frame: '07 10 02'
-|   Receiving SPI frame...
-|   Received: '00 04'
-|  EEPROM values: 00 04 
-Product version=4.0
-----------------------------------
-Reading firmware version...
-| PN5180::readEEprom(addr=12, *buffer, len=2)
-|  Reading EEPROM at 0x12, size=2...
-|  PN5180::transceiveCommand(*sendBuffer, sendBufferLen=3, *recvBuffer, recvBufferLen=2)
-|   Sending SPI frame: '07 12 02'
-|   Receiving SPI frame...
-|   Received: '00 04'
-|  EEPROM values: 00 04 
-Firmware version=4.0
-----------------------------------
-Reading EEPROM version...
-| PN5180::readEEprom(addr=14, *buffer, len=2)
-|  Reading EEPROM at 0x14, size=2...
-|  PN5180::transceiveCommand(*sendBuffer, sendBufferLen=3, *recvBuffer, recvBufferLen=2)
-|   Sending SPI frame: '07 14 02'
-|   Receiving SPI frame...
-|   Received: '00 99'
-|  EEPROM values: 00 99 
-EEPROM version=153.0
-----------------------------------
-Enable RF field...
-| Loading RF-Configuration...
-|  Load RF-Config: txConf=00, rxConf=80
-|   PN5180::transceiveCommand(*sendBuffer, sendBufferLen=3, *recvBuffer, recvBufferLen=0)
-|    Sending SPI frame: '11 00 80'
-|  done.
-|  Turning ON RF field...
-|  Set RF ON
-|   PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=0)
-|    Sending SPI frame: '16 00'
-|   wait for RF field to set up (max 500ms)
-|   PN5180::clearIRQStatus(mask=00000200)
-|    Clear IRQ-Status with mask
-|    PN5180::writeRegister(reg=3, value=512)
-|     Write Register 0x03 with value (LSB first)=0x00020000
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '00 03 00 02 00 00'
-|  done.
-| Set RF OFF
-|  PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=0)
-|   Sending SPI frame: '17 00'
-|  wait for RF field to shut down (max 500ms)
-|  PN5180::clearIRQStatus(mask=00000100)
-|   Clear IRQ-Status with mask
-|   PN5180::writeRegister(reg=3, value=256)
-|    Write Register 0x03 with value (LSB first)=0x00010000
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '00 03 00 01 00 00'
-| Set RF ON
-|  PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=0)
-|   Sending SPI frame: '16 00'
-|  wait for RF field to set up (max 500ms)
-|  PN5180::clearIRQStatus(mask=00000200)
-|   Clear IRQ-Status with mask
-|   PN5180::writeRegister(reg=3, value=512)
-|    Write Register 0x03 with value (LSB first)=0x00020000
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '00 03 00 02 00 00'
-| PN5180ISO14443::readCardSerial(*buffer)
-|  PN5180ISO14443::activateTypeA(*buffer, kind=0)
-|   Load RF-Config: txConf=00, rxConf=80
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=3, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '11 00 80'
-|   Set RF ON
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '16 00'
-|    wait for RF field to set up (max 500ms)
-|    *** ERROR: Set RF ON timeout
-|   PN5180::writeRegisterWithAndMask(reg=0, mask=-65)
-|    Write Register 0x00 with AND mask (LSB first)=0xBFFFFFFF
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '02 00 BF FF FF FF'
-|   PN5180::writeRegisterWithAndMask(reg=18, mask=-2)
-|    Write Register 0x12 with AND mask (LSB first)=0xFEFFFFFF
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '02 12 FE FF FF FF'
-|   PN5180::writeRegisterWithAndMask(reg=25, mask=-2)
-|    Write Register 0x19 with AND mask (LSB first)=0xFEFFFFFF
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '02 19 FE FF FF FF'
-|   PN5180::writeRegisterWithAndMask(reg=0, mask=-8)
-|    Write Register 0x00 with AND mask (LSB first)=0xF8FFFFFF
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '02 00 F8 FF FF FF'
-|   PN5180::writeRegisterWithOrMask(reg=0, mask=3)
-|    Write Register 0x00 with OR mask (LSB first)=0x03000000
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '01 00 03 00 00 00'
-|   PN5180::getTransceiveState()
-|    Get Transceive state...
-|    PN5180::readRegister(reg=0x1D, *value)
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|      Sending SPI frame: '04 1D'
-|      Receiving SPI frame...
-|      Received: '88 00 06 01'
-|     Register value=0x01060088
-|    TRANSCEIVE_STATE=0x01
-|   PN5180::clearIRQStatus(mask=FFFFFFFF)
-|    Clear IRQ-Status with mask
-|    PN5180::writeRegister(reg=3, value=-1)
-|     Write Register 0x03 with value (LSB first)=0xFFFFFFFF
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '00 03 FF FF FF FF'
-|   PN5180::sendData(*data, len=1, validBits=7)
-|    Send data (len=1): 26
-|    PN5180::writeRegisterWithAndMask(reg=0, mask=-8)
-|     Write Register 0x00 with AND mask (LSB first)=0xF8FFFFFF
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '02 00 F8 FF FF FF'
-|    PN5180::writeRegisterWithOrMask(reg=0, mask=3)
-|     Write Register 0x00 with OR mask (LSB first)=0x03000000
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '01 00 03 00 00 00'
-|    PN5180::getTransceiveState()
-|     Get Transceive state...
-|     PN5180::readRegister(reg=0x1D, *value)
-|      PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|       Sending SPI frame: '04 1D'
-|       Receiving SPI frame...
-|       Received: '89 00 06 01'
-|      Register value=0x01060089
-|     TRANSCEIVE_STATE=0x01
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=3, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '09 07 26'
-|   PN5180::readData(len=2, *buffer)
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=2)
-|     Sending SPI frame: '0A 00'
-|     Receiving SPI frame...
-|     Received: '04 00'
-|   wait for PN5180_TS_WaitTransmit (max 200ms)
-|   PN5180::clearIRQStatus(mask=FFFFFFFF)
-|    Clear IRQ-Status with mask
-|    PN5180::writeRegister(reg=3, value=-1)
-|     Write Register 0x03 with value (LSB first)=0xFFFFFFFF
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '00 03 FF FF FF FF'
-|   PN5180::sendData(*data, len=2, validBits=0)
-|    Send data (len=2): 93 20
-|    PN5180::writeRegisterWithAndMask(reg=0, mask=-8)
-|     Write Register 0x00 with AND mask (LSB first)=0xF8FFFFFF
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '02 00 F8 FF FF FF'
-|    PN5180::writeRegisterWithOrMask(reg=0, mask=3)
-|     Write Register 0x00 with OR mask (LSB first)=0x03000000
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '01 00 03 00 00 00'
-|    PN5180::getTransceiveState()
-|     Get Transceive state...
-|     PN5180::readRegister(reg=0x1D, *value)
-|      PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|       Sending SPI frame: '04 1D'
-|       Receiving SPI frame...
-|       Received: '89 00 02 01'
-|      Register value=0x01020089
-|     TRANSCEIVE_STATE=0x01
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=4, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '09 00 93 20'
-|   PN5180ISO14443::rxBytesReceived()
-|    PN5180::readRegister(reg=0x13, *value)
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|      Sending SPI frame: '04 13'
-|      Receiving SPI frame...
-|      Received: '05 00 00 00'
-|     Register value=0x00000005
-|   PN5180::readData(len=5, *buffer)
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=5)
-|     Sending SPI frame: '0A 00'
-|     Receiving SPI frame...
-|     Received: '1A CB 6A 06 BD'
-|   PN5180::writeRegisterWithOrMask(reg=18, mask=1)
-|    Write Register 0x12 with OR mask (LSB first)=0x01000000
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '01 12 01 00 00 00'
-|   PN5180::writeRegisterWithOrMask(reg=25, mask=1)
-|    Write Register 0x19 with OR mask (LSB first)=0x01000000
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '01 19 01 00 00 00'
-|   PN5180::sendData(*data, len=7, validBits=0)
-|    Send data (len=7): 93 70 1A CB 6A 06 BD
-|    PN5180::writeRegisterWithAndMask(reg=0, mask=-8)
-|     Write Register 0x00 with AND mask (LSB first)=0xF8FFFFFF
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '02 00 F8 FF FF FF'
-|    PN5180::writeRegisterWithOrMask(reg=0, mask=3)
-|     Write Register 0x00 with OR mask (LSB first)=0x03000000
-|     PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|      Sending SPI frame: '01 00 03 00 00 00'
-|    PN5180::getTransceiveState()
-|     Get Transceive state...
-|     PN5180::readRegister(reg=0x1D, *value)
-|      PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|       Sending SPI frame: '04 1D'
-|       Receiving SPI frame...
-|       Received: '89 00 02 01'
-|      Register value=0x01020089
-|     TRANSCEIVE_STATE=0x01
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=9, *recvBuffer, recvBufferLen=0)
-|     Sending SPI frame: '09 00 93 70 1A CB 6A 06 BD'
-|   PN5180::readData(len=1, *buffer)
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=1)
-|     Sending SPI frame: '0A 00'
-|     Receiving SPI frame...
-|     Received: '08'
-card serial successful, UID=1A:CB:6A:6
-This is a MIFARE Classic card.
-| PN5180::transceiveCommand(*sendBuffer, sendBufferLen=13, *recvBuffer, recvBufferLen=1)
-|  Sending SPI frame: '0C FF FF FF FF FF FF 60 00 1A CB 6A 06'
-|  Receiving SPI frame...
-|  Received: '00'
-Authentication successful.
-| PN5180::sendData(*data, len=2, validBits=0)
-|  Send data (len=2): 30 00
-|  PN5180::writeRegisterWithAndMask(reg=0, mask=-8)
-|   Write Register 0x00 with AND mask (LSB first)=0xF8FFFFFF
-|   PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|    Sending SPI frame: '02 00 F8 FF FF FF'
-|  PN5180::writeRegisterWithOrMask(reg=0, mask=3)
-|   Write Register 0x00 with OR mask (LSB first)=0x03000000
-|   PN5180::transceiveCommand(*sendBuffer, sendBufferLen=6, *recvBuffer, recvBufferLen=0)
-|    Sending SPI frame: '01 00 03 00 00 00'
-|  PN5180::getTransceiveState()
-|   Get Transceive state...
-|   PN5180::readRegister(reg=0x1D, *value)
-|    PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|     Sending SPI frame: '04 1D'
-|     Receiving SPI frame...
-|     Received: '89 00 02 01'
-|    Register value=0x01020089
-|   TRANSCEIVE_STATE=0x01
-|  PN5180::transceiveCommand(*sendBuffer, sendBufferLen=4, *recvBuffer, recvBufferLen=0)
-|   Sending SPI frame: '09 00 30 00'
-| PN5180ISO14443::rxBytesReceived()
-|  PN5180::readRegister(reg=0x13, *value)
-|   PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=4)
-|    Sending SPI frame: '04 13'
-|    Receiving SPI frame...
-|    Received: '10 00 00 00'
-|   Register value=0x00000010
-| PN5180::readData(len=16, *buffer)
-|  PN5180::transceiveCommand(*sendBuffer, sendBufferLen=2, *recvBuffer, recvBufferLen=16)
-|   Sending SPI frame: '0A 00'
-|   Receiving SPI frame...
-|   Received: '1A CB 6A 06 BD 08 04 00 62 63 64 65 66 67 68 69'
-Block 0 data: 1A:CB:6A:6:BD:8:4:0:62:63:64:65:66:67:68:69
-----------------------------------
-*/
